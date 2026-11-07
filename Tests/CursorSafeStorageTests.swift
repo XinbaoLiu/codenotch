@@ -49,6 +49,8 @@ final class CursorSafeStorageTests: XCTestCase {
         let iv = Data(repeating: UInt8(ascii: " "), count: kCCBlockSizeAES128)
         var outLength = 0
         var out = Data(count: plaintext.count + kCCBlockSizeAES128)
+        // Same exclusivity constraint as `CursorSafeStorage.aes128CBCDecrypt`.
+        let outCapacity = out.count
         let cryptStatus = out.withUnsafeMutableBytes { outBytes in
             plaintext.withUnsafeBytes { plainBytes in
                 key.withUnsafeBytes { keyBytes in
@@ -60,7 +62,7 @@ final class CursorSafeStorageTests: XCTestCase {
                             keyBytes.baseAddress, key.count,
                             ivBytes.baseAddress,
                             plainBytes.baseAddress, plaintext.count,
-                            outBytes.baseAddress, out.count,
+                            outBytes.baseAddress, outCapacity,
                             &outLength
                         )
                     }

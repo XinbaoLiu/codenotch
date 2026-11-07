@@ -88,6 +88,11 @@ enum CursorSafeStorage {
     private static func aes128CBCDecrypt(ciphertext: Data, key: Data) -> String? {
         var outLength = 0
         var out = Data(count: ciphertext.count + kCCBlockSizeAES128)
+        // Copy the length first. Reading `out.count` inside
+        // `withUnsafeMutableBytes` is an overlapping access on the Swift
+        // that ships with Xcode 26, so the sealed-token patch does not
+        // compile there. The buffer and the AES call are otherwise unchanged.
+        let outCapacity = out.count
         let status = out.withUnsafeMutableBytes { outBytes in
             ciphertext.withUnsafeBytes { cipherBytes in
                 key.withUnsafeBytes { keyBytes in
@@ -99,7 +104,7 @@ enum CursorSafeStorage {
                             keyBytes.baseAddress, key.count,
                             ivBytes.baseAddress,
                             cipherBytes.baseAddress, ciphertext.count,
-                            outBytes.baseAddress, out.count,
+                            outBytes.baseAddress, outCapacity,
                             &outLength
                         )
                     }

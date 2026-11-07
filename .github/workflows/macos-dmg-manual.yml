@@ -38,7 +38,9 @@ jobs:
       # Baseline is fork main at the moment this branch was cut, which matches
       # vinzdg/codenotch main. The fix is t0g3pii/codenotch afb6faf, opened as
       # vinzdg/codenotch#512, cherry-picked with `-x` onto that baseline.
-      # The three macOS blobs are the trees of that commit, not a retyped port.
+      # Those blobs stay on the cherry-pick commit. HEAD may differ only by
+      # copying `out.count` out of the CCCrypt closures, which Xcode 26 rejects
+      # as overlapping accesses. That does not change the AES call.
       - name: Verify pinned baseline and fix
         env:
           BASELINE_SHA: 835550a342871779135b6484d6899161c5222f7c
@@ -46,24 +48,37 @@ jobs:
         run: |
           set -euo pipefail
           git merge-base --is-ancestor "$BASELINE_SHA" HEAD
-          git log --format=%B "${BASELINE_SHA}..HEAD" | grep -F "$FIX_SHA"
+          set -- $(git log --format=%H --grep="cherry picked from commit ${FIX_SHA}" "${BASELINE_SHA}..HEAD")
+          test "$#" -eq 1
+          pick="$1"
           check() {
-            path="$1"
-            expected="$2"
-            actual=$(git rev-parse "HEAD:${path}")
+            rev="$1"
+            path="$2"
+            expected="$3"
+            actual=$(git rev-parse "${rev}:${path}")
             if [ "$actual" != "$expected" ]; then
-              echo "blob mismatch for ${path}: ${actual} != ${expected}" >&2
+              echo "blob mismatch for ${rev}:${path}: ${actual} != ${expected}" >&2
               exit 1
             fi
           }
-          check Sources/Providers/CursorCredentials.swift df616dd79daff99cc3719a219d9b928852533c62
-          check Sources/Providers/CursorSafeStorage.swift 37baee700308029395d94de95c77c7d55c552d40
-          check Tests/CursorSafeStorageTests.swift cfa823d5502285fd7743d5b9e115e028c7555b30
+          check "$pick" Sources/Providers/CursorCredentials.swift df616dd79daff99cc3719a219d9b928852533c62
+          check "$pick" Sources/Providers/CursorSafeStorage.swift 37baee700308029395d94de95c77c7d55c552d40
+          check "$pick" Tests/CursorSafeStorageTests.swift cfa823d5502285fd7743d5b9e115e028c7555b30
+          check HEAD Sources/Providers/CursorCredentials.swift df616dd79daff99cc3719a219d9b928852533c62
+          git diff --name-only "$pick" HEAD -- Sources Tests | sort > /tmp/fix-drift.txt
+          printf '%s\n' \
+            Sources/Providers/CursorSafeStorage.swift \
+            Tests/CursorSafeStorageTests.swift \
+            | sort > /tmp/fix-drift-expected.txt
+          diff -u /tmp/fix-drift-expected.txt /tmp/fix-drift.txt
+          git diff "$pick" HEAD -- Sources/Providers/CursorSafeStorage.swift Tests/CursorSafeStorageTests.swift | grep -q outCapacity
           grep -q 'CursorSafeStorage.decodeAccessToken' Sources/Providers/CursorCredentials.swift
           grep -q 'static let sealedPrefix = "cursor-safe-storage:v1:"' Sources/Providers/CursorSafeStorage.swift
+          grep -q 'let outCapacity = out.count' Sources/Providers/CursorSafeStorage.swift
           {
             echo "Baseline \`$BASELINE_SHA\` (XinbaoLiu/codenotch and vinzdg/codenotch \`main\`, 1.25.0)."
-            echo "Fix \`t0g3pii/codenotch@$FIX_SHA\` (https://github.com/vinzdg/codenotch/pull/512), cherry-picked onto that baseline."
+            echo "Fix \`t0g3pii/codenotch@$FIX_SHA\` (https://github.com/vinzdg/codenotch/pull/512), cherry-picked as \`$pick\`."
+            echo "HEAD adds only the Xcode 26 exclusivity copy (\`outCapacity\`) on the two CCCrypt closures."
             echo "Building \`$(git rev-parse HEAD)\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
