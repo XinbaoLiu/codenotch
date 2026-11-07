@@ -1,0 +1,155 @@
+name: macOS DMG (manual)
+
+# Fork-only disk image. This file does not publish a release, move a tag, or
+# refresh the upstream `preview` prerelease.
+#
+# `workflow_dispatch` becomes a button only after this file is on the default
+# branch. Until that merge, a push to the branch named below is the manual
+# start: GitHub reads the workflow from the pushed commit, so no default-branch
+# copy is required to run once.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cursor/macos-dmg-pr512-36a2
+
+# Checkout plus artifact upload. `contents: write` is intentionally absent so
+# this token cannot create a release, tag, or git ref.
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: macos-dmg-manual-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    name: Ad-hoc signed DMG
+    if: github.repository == 'XinbaoLiu/codenotch' && (github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/cursor/macos-dmg-pr512-36a2')
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Baseline is fork main at the moment this branch was cut, which matches
+      # vinzdg/codenotch main. The fix is t0g3pii/codenotch afb6faf, opened as
+      # vinzdg/codenotch#512, cherry-picked with `-x` onto that baseline.
+      # Those blobs stay on the cherry-pick commit. HEAD may differ only by
+      # copying `out.count` out of the CCCrypt closures, which Xcode 26 rejects
+      # as overlapping accesses. That does not change the AES call.
+      - name: Verify pinned baseline and fix
+        env:
+          BASELINE_SHA: 835550a342871779135b6484d6899161c5222f7c
+          FIX_SHA: afb6faf43587668f7f8f2e9d2ff84f0996c53c3e
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$BASELINE_SHA" HEAD
+          set -- $(git log --format=%H --grep="cherry picked from commit ${FIX_SHA}" "${BASELINE_SHA}..HEAD")
+          test "$#" -eq 1
+          pick="$1"
+          check() {
+            rev="$1"
+            path="$2"
+            expected="$3"
+            actual=$(git rev-parse "${rev}:${path}")
+            if [ "$actual" != "$expected" ]; then
+              echo "blob mismatch for ${rev}:${path}: ${actual} != ${expected}" >&2
+              exit 1
+            fi
+          }
+          check "$pick" Sources/Providers/CursorCredentials.swift df616dd79daff99cc3719a219d9b928852533c62
+          check "$pick" Sources/Providers/CursorSafeStorage.swift 37baee700308029395d94de95c77c7d55c552d40
+          check "$pick" Tests/CursorSafeStorageTests.swift cfa823d5502285fd7743d5b9e115e028c7555b30
+          check HEAD Sources/Providers/CursorCredentials.swift df616dd79daff99cc3719a219d9b928852533c62
+          git diff --name-only "$pick" HEAD -- Sources Tests | sort > /tmp/fix-drift.txt
+          printf '%s\n' \
+            Sources/Providers/CursorSafeStorage.swift \
+            Tests/CursorSafeStorageTests.swift \
+            | sort > /tmp/fix-drift-expected.txt
+          diff -u /tmp/fix-drift-expected.txt /tmp/fix-drift.txt
+          git diff "$pick" HEAD -- Sources/Providers/CursorSafeStorage.swift Tests/CursorSafeStorageTests.swift | grep -q outCapacity
+          grep -q 'CursorSafeStorage.decodeAccessToken' Sources/Providers/CursorCredentials.swift
+          grep -q 'static let sealedPrefix = "cursor-safe-storage:v1:"' Sources/Providers/CursorSafeStorage.swift
+          grep -q 'let outCapacity = out.count' Sources/Providers/CursorSafeStorage.swift
+          {
+            echo "Baseline \`$BASELINE_SHA\` (XinbaoLiu/codenotch and vinzdg/codenotch \`main\`, 1.25.0)."
+            echo "Fix \`t0g3pii/codenotch@$FIX_SHA\` (https://github.com/vinzdg/codenotch/pull/512), cherry-picked as \`$pick\`."
+            echo "HEAD adds only the Xcode 26 exclusivity copy (\`outCapacity\`) on the two CCCrypt closures."
+            echo "Building \`$(git rev-parse HEAD)\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          xcrun --show-sdk-version
+          uname -m
+
+      - name: Install dependencies
+        run: brew install xcodegen create-dmg
+
+      - name: Build the disk image
+        run: make dmg-ci
+
+      - name: Record the ad-hoc signature
+        run: |
+          set -euo pipefail
+          app="build/ci/DerivedData/Build/Products/Release/Codenotch.app"
+          bin="$app/Contents/MacOS/Codenotch"
+          test -x "$bin"
+          {
+            echo '### Binary'
+            echo
+            echo '```'
+            lipo -info "$bin"
+            echo '```'
+            echo
+            echo 'Ad-hoc signature (`codesign --sign -`). Not notarized. No Developer ID certificate is used.'
+            echo
+            echo '```'
+            codesign -dv --verbose=4 "$app" 2>&1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read the version and write checksums
+        id: version
+        run: |
+          set -euo pipefail
+          version=$(awk -F'"' '/MARKETING_VERSION:/ {print $2; exit}' project.yml)
+          test -n "$version"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          cd build/ci
+          shasum -a 256 *.dmg > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        id: upload
+        with:
+          name: Codenotch-${{ steps.version.outputs.value }}-${{ github.sha }}-pr512
+          path: |
+            build/ci/*.dmg
+            build/ci/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Note the download limits
+        run: |
+          {
+            echo "### Download"
+            echo
+            echo "Artifact: ${{ steps.upload.outputs.artifact-url }}"
+            echo
+            echo "The artifact contains the \`.dmg\` and \`SHA256SUMS\` only. Nothing is published as a release, tag, or preview."
+            echo "The image is ad-hoc signed and not notarized, so Gatekeeper quarantines it. This run does not log into Cursor and does not check whether usage loads."
+            echo
+            echo "After dragging the app to \`/Applications\`, clear the quarantine flag once:"
+            echo
+            echo '```'
+            echo "xattr -dr com.apple.quarantine /Applications/Codenotch.app"
+            echo '```'
+            echo
+            echo "\`make dmg-ci\` signs for the runner's own architecture (\`uname -m\` on \`macos-26\`), which is the upstream unsigned path."
+          } >> "$GITHUB_STEP_SUMMARY"
